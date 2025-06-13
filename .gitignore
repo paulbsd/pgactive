@@ -58,3 +58,4 @@ lib*.pc
 pgactive-*.asc
 pgactive-*.md5
 /.pg_version
+/src/*.bc

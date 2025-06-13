@@ -21,7 +21,7 @@ EXTRA_CLEAN = src/pgactive_init_copy$(X) src/pgactive_init_copy.o include/pgacti
 	pgactive_dump$(X) $(pgactive_DUMP_OBJS) \
 
 # When in development add -Werror.
-PG_CPPFLAGS = -I$(srcdir)/include -I$(srcdir)/src/$(pgactive_PGVERCOMPAT_INCDIR) -I$(libpq_srcdir) -Wall -Wmissing-prototypes -Wmissing-declarations $(EXTRA_CFLAGS)
+PG_CPPFLAGS = -I$(srcdir)/include -I$(srcdir)/src/$(pgactive_PGVERCOMPAT_INCDIR) -I$(libpq_srcdir) $(shell krb5-config --cflags) -Wall -Wmissing-prototypes -Wmissing-declarations $(EXTRA_CFLAGS)
 SHLIB_LINK = $(libpq)
 
 OBJS = src/pgactive.o \
@@ -150,6 +150,7 @@ pgactive_DUMP_OBJS = $(pgactive_DUMP_DIR)/pg_dump.o \
 	$(pgactive_DUMP_DIR)/compress_io.o
 
 PG_CONFIG_LIBS = $(shell $(PG_CONFIG) --libs) 
+PG_PKGLIBDIR = $(shell $(PG_CONFIG) --pkglibdir)
 
 pgactive_DUMP_LIBS = $(PG_CONFIG_LIBS) -lpgfeutils
 
@@ -179,10 +180,10 @@ endif
 pgactive_DUMP_OBJS += $(pgactive_DUMP_DIR)/string_utils.o
 
 pgactive_dump: $(pgactive_DUMP_OBJS)
-	$(CC) $(CFLAGS) $(pgactive_DUMP_OBJS) $(libpq_pgport) $(LDFLAGS) $(LDFLAGS_EX) $(pgactive_DUMP_LIBS) -o $@$(X)
+	$(CC) $(CFLAGS) $(pgactive_DUMP_OBJS) $(libpq_pgport) $(LDFLAGS) $(LDFLAGS_EX) $(pgactive_DUMP_LIBS) -L$(PG_PKGLIBDIR) -o $@$(X)
 
 pgactive_init_copy: src/pgactive_init_copy.o src/pgactive_common.o
-	$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LDFLAGS_EX) $(PG_CONFIG_LIBS) $(libpq_pgport) -o $@$(X)
+	$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LDFLAGS_EX) $(PG_CONFIG_LIBS) $(libpq_pgport) -L$(PG_PKGLIBDIR) -o $@$(X)
 
 DATE=$(shell date "+%Y-%m-%d")
 GITHASH=$(shell if [ -e .distgitrev ]; then cat .distgitrev; else GIT_DIR=${pgactive_abs_srcdir}/.git git rev-parse --short HEAD; fi)
