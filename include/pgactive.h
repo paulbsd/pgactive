@@ -37,6 +37,15 @@
 #include "pgactive_compat.h"
 #include "nodes/execnodes.h"
 
+/* pg_fallthrough was introduced in PG 19 (c.h) */
+#ifndef pg_fallthrough
+#if __has_attribute(fallthrough)
+#define pg_fallthrough __attribute__((fallthrough))
+#else
+#define pg_fallthrough
+#endif
+#endif
+
 #define NODEID_BITS		10
 #define MAX_NODE_ID		((1 << NODEID_BITS) - 1)
 
@@ -102,6 +111,8 @@
 #define pgactive_DUMP_CMD "pgactive_dump"
 
 #define pgactive_SUPERVISOR_DBNAME "pgactive_supervisordb"
+
+#define pgactive_SCHEMA_NAME "pgactive"
 
 #define pgactive_LOGICAL_MSG_PREFIX "pgactive"
 
@@ -444,11 +455,12 @@ extern bool pgactive_log_conflicts_to_table;
 extern bool pgactive_log_conflicts_to_logfile;
 extern bool pgactive_conflict_logging_include_tuples;
 
-/* replaced by pgactive_skip_ddl_replication for now
-extern bool pgactive_permit_ddl_locking;
-extern bool pgactive_permit_unsafe_commands;
-extern bool pgactive_skip_ddl_locking;
-*/
+/*
+ * replaced by pgactive_skip_ddl_replication for now
+ * extern bool pgactive_permit_ddl_locking;
+ * extern bool pgactive_permit_unsafe_commands;
+ * extern bool pgactive_skip_ddl_locking;
+ */
 extern bool pgactive_skip_ddl_replication;
 extern bool prev_pgactive_skip_ddl_replication;
 extern bool pgactive_do_not_replicate;
@@ -466,6 +478,7 @@ extern int	pgactive_init_node_parallel_jobs;
 extern int	pgactive_max_nodes;
 extern bool pgactive_permit_node_identifier_getter_function_creation;
 extern bool pgactive_debug_trace_connection_errors;
+extern bool pgactive_apply_as_table_owner;
 
 static const char *const pgactive_default_apply_connection_options =
 "connect_timeout=30 "
@@ -772,7 +785,7 @@ extern struct pg_conn *pgactive_establish_connection_and_slot(const char *dsn,
 															  const char *application_name_suffix,
 															  Name out_slot_name,
 															  pgactiveNodeId * out_nodeid,
-															  RepOriginId *out_rep_origin_id,
+															  RepOriginId * out_rep_origin_id,
 															  char *out_snapshot);
 
 extern PGconn *pgactive_connect_nonrepl(const char *connstring,

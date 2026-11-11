@@ -65,11 +65,36 @@
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
-/* Useful for development:
-#define VERBOSE_INSERT
-#define VERBOSE_DELETE
-#define VERBOSE_UPDATE
-*/
+#if PG_VERSION_NUM >= 160000
+#include "utils/usercontext.h"
+#else
+typedef struct UserContext
+{
+	Oid			save_userid;
+	int			save_sec_context;
+} UserContext;
+
+static inline void
+SwitchToUntrustedUser(Oid userid, UserContext *context)
+{
+	GetUserIdAndSecContext(&context->save_userid, &context->save_sec_context);
+	SetUserIdAndSecContext(userid,
+						   context->save_sec_context | SECURITY_RESTRICTED_OPERATION);
+}
+
+static inline void
+RestoreUserContext(UserContext *context)
+{
+	SetUserIdAndSecContext(context->save_userid, context->save_sec_context);
+}
+#endif
+
+/*
+ * Useful for development:
+ * #define VERBOSE_INSERT
+ * #define VERBOSE_DELETE
+ * #define VERBOSE_UPDATE
+ */
 
 /* Relation oid cache; initialized then left unchanged */
 Oid			QueuedDDLCommandsRelid = InvalidOid;
@@ -141,7 +166,7 @@ static void process_remote_delete(StringInfo s);
 
 static void get_local_tuple_origin(HeapTuple tuple,
 								   TimestampTz *commit_ts,
-								   RepOriginId *node_id);
+								   RepOriginId * node_id);
 static void abs_timestamp_difference(TimestampTz start_time,
 									 TimestampTz stop_time,
 									 long *secs, int *microsecs);
@@ -605,6 +630,7 @@ process_remote_insert(StringInfo s)
 	ItemPointerData conflicting_tid;
 	ErrorContextCallback errcallback;
 	struct ActionErrCallbackArg cbarg;
+	UserContext ucxt;
 
 	ItemPointerSetInvalid(&conflicting_tid);
 
@@ -621,6 +647,14 @@ process_remote_insert(StringInfo s)
 	Assert(pgactive_apply_worker != NULL);
 
 	rel = read_rel(s, RowExclusiveLock, &cbarg);
+
+	if (pgactive_apply_as_table_owner)
+	{
+		SwitchToUntrustedUser(rel->rel->rd_rel->relowner, &ucxt);
+		elog(DEBUG1, "pgactive apply INSERT as user %s on %s",
+			 GetUserNameFromId(rel->rel->rd_rel->relowner, false),
+			 RelationGetRelationName(rel->rel));
+	}
 
 	emit_replay_info(&cbarg);
 
@@ -841,6 +875,9 @@ process_remote_insert(StringInfo s)
 
 	PopActiveSnapshot();
 
+	if (pgactive_apply_as_table_owner)
+		RestoreUserContext(&ucxt);
+
 	ExecCloseIndices(relinfo);
 
 	check_pgactive_wakeups(rel);
@@ -932,6 +969,7 @@ process_remote_update(StringInfo s)
 	ErrorContextCallback errcallback;
 	struct ActionErrCallbackArg cbarg;
 	ResultRelInfo *relinfo = makeNode(ResultRelInfo);
+	UserContext ucxt;
 
 	xact_action_counter++;
 	memset(&cbarg, 0, sizeof(struct ActionErrCallbackArg));
@@ -944,6 +982,14 @@ process_remote_update(StringInfo s)
 	pgactive_performing_work();
 
 	rel = read_rel(s, RowExclusiveLock, &cbarg);
+
+	if (pgactive_apply_as_table_owner)
+	{
+		SwitchToUntrustedUser(rel->rel->rd_rel->relowner, &ucxt);
+		elog(DEBUG1, "pgactive apply UPDATE as user %s on %s",
+			 GetUserNameFromId(rel->rel->rd_rel->relowner, false),
+			 RelationGetRelationName(rel->rel));
+	}
 
 	emit_replay_info(&cbarg);
 
@@ -985,9 +1031,13 @@ process_remote_update(StringInfo s)
 	read_tuple_parts(s, rel, &new_tuple);
 
 	/* lookup index to build scankey */
-	if (rel->rel->rd_indexvalid == 0)
-		RelationGetIndexList(rel->rel);
-	idxoid = rel->rel->rd_replidindex;
+	idxoid = RelationGetReplicaIndex(rel->rel);
+	if (!OidIsValid(idxoid))
+#if PG_VERSION_NUM >= 180000
+		idxoid = RelationGetPrimaryKeyIndex(rel->rel, false);
+#else
+		idxoid = RelationGetPrimaryKeyIndex(rel->rel);
+#endif
 	if (!OidIsValid(idxoid))
 		elog(ERROR, "could not find primary key for table with oid %u",
 			 RelationGetRelid(rel->rel));
@@ -1178,6 +1228,9 @@ process_remote_update(StringInfo s)
 
 	PopActiveSnapshot();
 
+	if (pgactive_apply_as_table_owner)
+		RestoreUserContext(&ucxt);
+
 	check_pgactive_wakeups(rel);
 
 	/* release locks upon commit */
@@ -1208,6 +1261,7 @@ process_remote_delete(StringInfo s)
 	ErrorContextCallback errcallback;
 	struct ActionErrCallbackArg cbarg;
 	ResultRelInfo *relinfo = makeNode(ResultRelInfo);
+	UserContext ucxt;
 
 	Assert(pgactive_apply_worker != NULL);
 
@@ -1223,6 +1277,14 @@ process_remote_delete(StringInfo s)
 
 	rel = read_rel(s, RowExclusiveLock, &cbarg);
 
+	if (pgactive_apply_as_table_owner)
+	{
+		SwitchToUntrustedUser(rel->rel->rd_rel->relowner, &ucxt);
+		elog(DEBUG1, "pgactive apply DELETE as user %s on %s",
+			 GetUserNameFromId(rel->rel->rd_rel->relowner, false),
+			 RelationGetRelationName(rel->rel));
+	}
+
 	emit_replay_info(&cbarg);
 
 	action = pq_getmsgbyte(s);
@@ -1233,6 +1295,8 @@ process_remote_delete(StringInfo s)
 	if (action == 'E')
 	{
 		elog(WARNING, "got delete without pkey");
+		if (pgactive_apply_as_table_owner)
+			RestoreUserContext(&ucxt);
 		pgactive_table_close(rel, NoLock);
 		return;
 	}
@@ -1250,7 +1314,13 @@ process_remote_delete(StringInfo s)
 	/* lookup index to build scankey */
 	if (rel->rel->rd_indexvalid == 0)
 		RelationGetIndexList(rel->rel);
-	idxoid = rel->rel->rd_replidindex;
+	idxoid = RelationGetReplicaIndex(rel->rel);
+	if (!OidIsValid(idxoid))
+#if PG_VERSION_NUM >= 180000
+		idxoid = RelationGetPrimaryKeyIndex(rel->rel, false);
+#else
+		idxoid = RelationGetPrimaryKeyIndex(rel->rel);
+#endif
 	if (!OidIsValid(idxoid))
 		elog(ERROR, "could not find primary key for table with oid %u",
 			 RelationGetRelid(rel->rel));
@@ -1356,6 +1426,9 @@ process_remote_delete(StringInfo s)
 
 	PopActiveSnapshot();
 
+	if (pgactive_apply_as_table_owner)
+		RestoreUserContext(&ucxt);
+
 	check_pgactive_wakeups(rel);
 
 	index_close(idxrel, NoLock);
@@ -1374,7 +1447,7 @@ process_remote_delete(StringInfo s)
  * Get commit timestamp and origin of the tuple
  */
 static void
-get_local_tuple_origin(HeapTuple tuple, TimestampTz *commit_ts, RepOriginId *node_id)
+get_local_tuple_origin(HeapTuple tuple, TimestampTz *commit_ts, RepOriginId * node_id)
 {
 	TransactionId xmin;
 	RepOriginId node_id_raw;
@@ -2128,7 +2201,7 @@ read_tuple_parts(StringInfo s, pgactiveRelation * rel, pgactiveTupleData * tup)
 	{
 		FormData_pg_attribute *att = TupleDescAttr(desc, i);
 		char		kind;
-		const char *data;
+		char	   *data;
 		int			len;
 
 		kind = pq_getmsgbyte(s);
@@ -2150,9 +2223,58 @@ read_tuple_parts(StringInfo s, pgactiveRelation * rel, pgactiveTupleData * tup)
 				tup->isnull[i] = false;
 				len = pq_getmsgint(s, 4);	/* read length */
 
-				data = pq_getmsgbytes(s, len);
+				if (len < 0)
+					elog(ERROR, "invalid length %d for attribute \"%s\"",
+						 len, NameStr(att->attname));
 
-				/* and data */
+				/*
+				 * Keep by-reference values independent of the input message.
+				 */
+				data = palloc0(len + 1);
+				pq_copymsgbytes(s, data, len);
+
+				/*
+				 * Match the representation expected by the local attribute
+				 * before building its Datum.
+				 */
+				if (att->attlen > 0)
+				{
+					if (len != att->attlen)
+						elog(ERROR, "invalid length %d for attribute \"%s\" (expected %d)",
+							 len, NameStr(att->attname), att->attlen);
+				}
+				else if (att->attlen == -1)
+				{
+					/*
+					 * Note that the output side does not send external values
+					 * in this format.  It marks unchanged on-disk values with
+					 * 'u' and expands indirect values before sending them.
+					 *
+					 * Inspect the one-byte header first, as reading a regular
+					 * varlena header requires at least VARHDRSZ bytes.
+					 */
+					if (len < (int) VARHDRSZ_SHORT || VARATT_IS_EXTERNAL(data))
+						elog(ERROR, "invalid varlena datum for attribute \"%s\"",
+							 NameStr(att->attname));
+
+					if (VARATT_IS_SHORT(data))
+					{
+						if ((int) VARSIZE_SHORT(data) != len)
+							elog(ERROR, "invalid varlena length %d for attribute \"%s\" (expected %d)",
+								 (int) VARSIZE_SHORT(data), NameStr(att->attname), len);
+					}
+					else if (len < (int) VARHDRSZ || (int) VARSIZE(data) != len)
+					{
+						elog(ERROR, "invalid varlena length for attribute \"%s\"",
+							 NameStr(att->attname));
+					}
+				}
+				else
+				{
+					elog(ERROR, "unsupported type length %d for attribute \"%s\"",
+						 att->attlen, NameStr(att->attname));
+				}
+
 				if (att->attbyval)
 					tup->values[i] = fetch_att(data, true, len);
 				else
@@ -2171,14 +2293,14 @@ read_tuple_parts(StringInfo s, pgactiveRelation * rel, pgactiveTupleData * tup)
 										   &typreceive, &typioparam);
 
 					/*
-					 * Create StringInfo pointing into the bigger buffer.
-					 * First free the palloc-ed memory that initStringInfo
-					 * gives to not leak any memory.
+					 * Keep the receive-function input in its own StringInfo
+					 * buffer.
 					 */
 					initStringInfo(&buf);
-					pfree(buf.data);
-					buf.data = (char *) pq_getmsgbytes(s, len);
+					enlargeStringInfo(&buf, len);
+					pq_copymsgbytes(s, buf.data, len);
 					buf.len = len;
+					buf.data[len] = '\0';
 					tup->values[i] = OidReceiveFunctionCall(
 															typreceive, &buf, typioparam, att->atttypmod);
 
@@ -2197,10 +2319,14 @@ read_tuple_parts(StringInfo s, pgactiveRelation * rel, pgactiveTupleData * tup)
 					len = pq_getmsgint(s, 4);	/* read length */
 
 					getTypeInputInfo(att->atttypid, &typinput, &typioparam);
-					/* and data */
-					data = (char *) pq_getmsgbytes(s, len);
+
+					/*
+					 * Type input functions expect a zero-terminated string.
+					 */
+					data = palloc0(len + 1);
+					pq_copymsgbytes(s, data, len);
 					tup->values[i] = OidInputFunctionCall(
-														  typinput, (char *) data, typioparam, att->atttypmod);
+														  typinput, data, typioparam, att->atttypmod);
 				}
 				break;
 			default:
@@ -2558,7 +2684,7 @@ log_tuple(const char *format, TupleDesc desc, HeapTuple tup)
  * since we'd have to reconnect to apply most kinds of change anyway.
  */
 static void
-pgactive_apply_reload_config()
+pgactive_apply_reload_config(void)
 {
 	pgactiveConnectionConfig *new_apply_config;
 

@@ -11,6 +11,9 @@ Table of contents
 
 The pgactive extension exposes a number of configuration parameters via PostgreSQL\'s usual configuration mechanism. You can set these in the same way as any other setting, via `postgresql.conf` or using `ALTER SYSTEM`. Some variables can also be set per-user, per-database or per-session, but most require a server reload or a full server restart to take effect.
 
+`pgactive.apply_as_table_owner` (`boolean`)
+
+Apply DML changes as the table owner instead of superuser. When enabled, the apply worker switches to the table owner before executing INSERT, UPDATE, or DELETE operations.
 
 `pgactive.conflict_logging_include_tuples` (`boolean`)
 
@@ -46,7 +49,7 @@ Controls how long a DDL lock attempt can wait for concurrent write transactions 
 
 Controls how long a DDL lock attempt can wait to acquire the lock.  The default value `-1` (the default) uses the value of `lock_timeout`. Can be set with time units like `'10s'`. See DDL Locking. Note that once the DDL lock is acquired and the DDL operation begins this timer stops ticking; it doesn\'t limit the overall duration a DDL lock may be held, only how long a transaction can wait for one to be acquired. To limit overall duration use a `statement_timeout`.
 
-`pgactive.debug_trace_ddl_locks_level` (`boolean`)
+`pgactive.debug_trace_ddl_locks_level` (`enum`)
 
 Override the default debug log level for pgactive DDL locking (used in DDL replication) so that DDL-lock related messages are emitted at the LOG debug level instead. This can be used to trace DDL locking activity on the system without having to configure the extremely verbose DEBUG1 or DEBUG2 log levels for the whole server.
 

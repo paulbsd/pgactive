@@ -47,6 +47,7 @@
 #include "postmaster/bgwriter.h"
 #include "postmaster/fork_process.h"
 
+#include "storage/fd.h"
 #include "storage/latch.h"
 #include "storage/lwlock.h"
 #include "storage/proc.h"
@@ -714,7 +715,7 @@ pgactive_insert_remote_conninfo(PGconn *conn, pgactiveConnectionConfig * myconfi
  * and it's guaranteed to retain more than the WAL we need.
  */
 static void
-pgactive_init_make_other_slots()
+pgactive_init_make_other_slots(void)
 {
 	List	   *configs;
 	ListCell   *lc;
@@ -781,7 +782,7 @@ pgactive_init_make_other_slots()
  * Wait until all such entries are created and active, then return.
  */
 static void
-pgactive_init_wait_for_slot_creation()
+pgactive_init_wait_for_slot_creation(void)
 {
 	List	   *configs;
 	ListCell   *lc;
@@ -1002,9 +1003,11 @@ pgactive_nodes_set_remote_status_ready(PGconn *conn)
 
 	if (PQntuples(res) != 1)
 	{
+		int			ntuples = PQntuples(res);
+
 		PQclear(res);
 		elog(ERROR, "failed to update my pgactive.pgactive_nodes entry on remote server: affected %d rows instead of expected 1",
-			 PQntuples(res));
+			 ntuples);
 	}
 
 	Assert(PQnfields(res) == 1);
@@ -1033,7 +1036,7 @@ pgactive_nodes_set_remote_status_ready(PGconn *conn)
  * Idle until our local node status goes 'r'
  */
 static void
-pgactive_wait_for_local_node_ready()
+pgactive_wait_for_local_node_ready(void)
 {
 	pgactiveNodeStatus status = pgactive_NODE_STATUS_NONE;
 	pgactiveNodeId myid;

@@ -334,16 +334,6 @@ on_exit_close_archive(Archive *AHX)
 }
 
 /*
- * When pg_restore restores multiple databases, then update already added entry
- * into array for cleanup.
- */
-void
-replace_on_exit_close_archive(Archive *AHX)
-{
-	shutdown_info.AHX = AHX;
-}
-
-/*
  * on_exit_nicely handler for shutting down database connections and
  * worker processes cleanly.
  */
@@ -986,6 +976,8 @@ ParallelBackupStart(ArchiveHandle *AH)
 
 		handle = _beginthreadex(NULL, 0, (void *) &init_spawned_worker_win32,
 								wi, 0, &(slot->threadId));
+		if (handle == 0)
+			pg_fatal("could not create worker thread: %m");
 		slot->hThread = handle;
 		slot->workerStatus = WRKR_IDLE;
 #else							/* !WIN32 */
